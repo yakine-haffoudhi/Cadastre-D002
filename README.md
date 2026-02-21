@@ -235,8 +235,3 @@ Cadastre-D002
 
 Les personnes physiques ne possèdent pas de SIREN dans MAJIC open data.
 
----
-
-Yakine
-
-Projet exercice technique Cadastre PCI
