@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cadastre - Parcelles (PCI 02)</title>
+
+  <!-- Leaflet (librairie de carte) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"/>
+
+  <style>
+    /* Plein écran */
+    html, body { height: 100%; margin: 0; }
+    #map { height: 100%; width: 100%; }
+
+    /* Petit panneau d’info */
+    .panel{
+      position:absolute;
+      top:12px; left:12px;
+      z-index:1000;
+      background:#fff;
+      padding:10px 12px;
+      border-radius:10px;
+      box-shadow:0 2px 12px rgba(0,0,0,.18);
+      font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      max-width:380px;
+      line-height:1.25;
+    }
+    .panel small{ color:#555; display:block; margin-top:4px; }
+    .status{ margin-top:8px; font-size:13px; color:#222; }
+    .status.err{ color:#b00020; }
+    .status.ok{ color:#0b6b0b; }
+    .hint{ margin-top:6px; font-size:12px; color:#666; }
+    .kbd{ font-family: ui-monospace, Menlo, Consolas, monospace; background:#f3f3f3; padding:0 6px; border-radius:6px; }
+    .muted{ color:#666; font-size:12px; }
+  </style>
+</head>
+
+<body>
+  <div id="map"></div>
+
+  <div class="panel">
+    <div><strong>Parcelles PCI (Aisne - 02)</strong></div>
+    <small>Fond : OpenStreetMap • Parcelles via API • Clic = SIREN propriétaire</small>
+    <div class="status" id="status">Chargement…</div>
+    <div class="hint">Zoome à <span class="kbd">14+</span> pour charger les parcelles.</div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <script>
+    // CONFIG API + ZOOM
+    const API_BASE = `http://${location.hostname}:3001`;
+    const MIN_ZOOM_TO_LOAD = 12;
+
+    //  Afficher un message clair dans le panneau
+    const statusEl = document.getElementById("status");
+    function setStatus(msg, kind="") {
+      statusEl.textContent = msg;
+      statusEl.className = "status" + (kind ? (" " + kind) : "");
+    }
+
+    // Un SIREN 
+    function isValidSiren(s) {
+      return /^\d{9}$/.test(String(s || ""));
+    }
+
+    // CRÉATION CARTE 
+    const map = L.map("map").setView([49.381, 3.323], 13); // Soissons approx
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
+
+    // COUCHE DES PARCELLES + POPUP + CLIC 
+    const parcelsLayer = L.geoJSON(null, {
+      style: () => ({ weight: 1, opacity: 0.9, fillOpacity: 0.15 }),
+
+      onEachFeature: (feature, layer) => {
+        const p = feature.properties || {};
+        const gid = feature.id;
+
+        //  HTML de base de la popup
+        function baseHtml(extra = "") {
+          return `
+            <div style="font-family:system-ui; min-width:260px">
+              <div><strong>${p.nom_com ?? ""}</strong></div>
+              <div>Section: ${p.section ?? ""} • N°: ${p.numero ?? ""}</div>
+              <div>IDU: ${p.idu ?? ""}</div>
+              <div>Contenance: ${p.contenance ?? ""}</div>
+              <div class="muted" style="margin-top:6px;">gid: ${gid ?? ""}</div>
+              ${extra}
+            </div>
+          `;
+        }
+
+        // Popup initiale
+        layer.bindPopup(baseHtml(`
+          <hr style="border:none;border-top:1px solid #eee;margin:8px 0">
+          <div class="muted">Clique sur la parcelle pour charger le propriétaire…</div>
+        `));
+
+        // Au clic -> 1) MAJIC owner 2) bonus API SIREN
+        layer.on("click", async () => {
+          layer.bindPopup(baseHtml(`
+            <hr style="border:none;border-top:1px solid #eee;margin:8px 0">
+            <div><strong>Propriétaire (MAJIC)</strong></div>
+            <div>Chargement…</div>
+          `)).openPopup();
+
+          try {
+            // 1) Appel MAJIC via ton backend
+            const r = await fetch(`${API_BASE}/parcelles/${gid}/owner`);
+            if (!r.ok) throw new Error(`owner HTTP ${r.status}`);
+            const owner = await r.json();
+
+            const siren = owner.siren ?? null;
+            const ownerName = owner.owner ?? null;
+
+            // Si pas de siren => souvent personne physique (normal)
+            if (!siren) {
+              layer.bindPopup(baseHtml(`
+                <hr style="border:none;border-top:1px solid #eee;margin:8px 0">
+                <div><strong>Propriétaire (MAJIC)</strong></div>
+                <div>SIREN: <strong>Non trouvé</strong></div>
+                <div class="muted">${owner.note ?? "Aucun résultat MAJIC."}</div>
+                <div class="muted" style="margin-top:6px;">${owner.source ?? ""}</div>
+              `)).openPopup();
+              return;
+            }
+
+            // 2) Bonus: infos entreprise (API SIREN)
+            let sirenInfoHtml = "";
+            if (isValidSiren(siren)) {
+              try {
+                const r2 = await fetch(`${API_BASE}/siren/${siren}`);
+                if (r2.ok) {
+                  const ent = await r2.json();
+                  const denom =
+                    ent.nom_complet ||
+                    ent.denomination ||
+                    ent.nom_raison_sociale ||
+                    ent.nom ||
+                    ent.raison_sociale ||
+                    "";
+
+                  const activite = ent.activite_principale || ent.activite || "";
+                  const ville = ent.siege?.commune || ent.etablissement_siege?.libelle_commune || "";
+                  const cp = ent.siege?.code_postal || ent.etablissement_siege?.code_postal || "";
+
+                  sirenInfoHtml = `
+                    <hr style="border:none;border-top:1px solid #eee;margin:8px 0">
+                    <div><strong>Entreprise (API SIREN)</strong></div>
+                    ${denom ? `<div>${denom}</div>` : ""}
+                    <div class="muted">
+                      ${activite ? `Activité: ${activite}<br>` : ""}
+                      ${ville || cp ? `Siège: ${cp ?? ""} ${ville ?? ""}` : ""}
+                    </div>
+                  `;
+                } else {
+                  sirenInfoHtml = `
+                    <hr style="border:none;border-top:1px solid #eee;margin:8px 0">
+                    <div class="muted">Infos entreprise indisponibles (HTTP ${r2.status}).</div>
+                  `;
+                }
+              } catch {
+                sirenInfoHtml = `
+                  <hr style="border:none;border-top:1px solid #eee;margin:8px 0">
+                  <div class="muted">Erreur appel API SIREN.</div>
+                `;
+              }
+            }
+
+            // Popup finale
+            layer.bindPopup(baseHtml(`
+              <hr style="border:none;border-top:1px solid #eee;margin:8px 0">
+              <div><strong>Propriétaire (MAJIC)</strong></div>
+              <div>SIREN: <strong>${siren}</strong></div>
+              ${ownerName ? `<div>${ownerName}</div>` : ""}
+              <div class="muted" style="margin-top:6px;">${owner.source ?? ""}</div>
+              ${sirenInfoHtml}
+            `)).openPopup();
+
+          } catch (e) {
+            layer.bindPopup(baseHtml(`
+              <hr style="border:none;border-top:1px solid #eee;margin:8px 0">
+              <div class="status err">Erreur: ${e.message}</div>
+              <div class="muted">Vérifie que l’API tourne et que /parcelles/${gid}/owner existe.</div>
+            `)).openPopup();
+          }
+        });
+      }
+    }).addTo(map);
+
+    //CHARGER LES PARCELLES EN FONCTION DE LA VUE 
+    function computeLimit(z) {
+      if (z >= 17) return 2000;
+      if (z >= 15) return 1200;
+      if (z >= 14) return 600;
+      return 0;
+    }
+
+    let abortCtrl = null;
+
+    async function loadParcels() {
+      const z = map.getZoom();
+      const limit = computeLimit(z);
+
+      // On évite de charger trop tôt (trop de données)
+      if (z < MIN_ZOOM_TO_LOAD) {
+        parcelsLayer.clearLayers();
+        setStatus(`Zoom ${z} : zoome à ${MIN_ZOOM_TO_LOAD}+ pour charger.`, "");
+        return;
+      }
+
+      // Bbox visible 
+      const b = map.getBounds();
+      const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(",");
+
+      // Annule la requête précédente si l’utilisateur bouge vite
+      if (abortCtrl) abortCtrl.abort();
+      abortCtrl = new AbortController();
+
+      setStatus(`Chargement… (zoom ${z}, limit ${limit})`, "");
+
+      try {
+        const url = `${API_BASE}/parcelles-view?bbox=${encodeURIComponent(bbox)}&limit=${limit}`;
+        const r = await fetch(url, { signal: abortCtrl.signal });
+
+        if (!r.ok) {
+          let details = "";
+          try { details = (await r.json())?.error ?? ""; } catch (_) {}
+          throw new Error(`HTTP ${r.status}${details ? " — " + details : ""}`);
+        }
+
+        const geojson = await r.json();
+
+        parcelsLayer.clearLayers();
+        parcelsLayer.addData(geojson);
+
+        const n = (geojson.features || []).length;
+        setStatus(n ? `Parcelles affichées : ${n}` : `0 parcelle dans la vue (déplace/zoome).`, n ? "ok" : "");
+      } catch (e) {
+        if (e.name === "AbortError") return;
+        setStatus(`Erreur: ${e.message}`, "err");
+        console.error(e);
+      }
+    }
+
+    // Petit debounce pour éviter d’appeler l’API à chaque micro-mouvement
+    function debounce(fn, ms) {
+      let t = null;
+      return () => { clearTimeout(t); t = setTimeout(fn, ms); };
+    }
+
+    const loadDebounced = debounce(loadParcels, 350);
+    map.on("moveend", loadDebounced);
+    map.on("zoomend", loadDebounced);
+
+    // premier chargement
+    loadParcels();
+  </script>
+</body>
+</html>
